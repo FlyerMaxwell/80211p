@@ -68,7 +68,10 @@ typedef struct vehicle
 
     int tx_timestamp;
 
+    bool tx_collision_flag; //当前发射过程是否有collision
+
     vector<int> * packets;
+    vector<struct packet*> *packet_info_list;
     int transmitted_packets;
 
 }Vehicle;

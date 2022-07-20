@@ -7,6 +7,8 @@
 #include "common.h"
 #include "vehicle.h"
 #include <iostream>
+#include "packets.h"
+#include "string.h"
 
 
 using namespace std;
@@ -72,7 +74,6 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
 
         //每100ms 添加发包的需求
         if((slot - aCar->slot_appeared)% pkt_gen_gap == 0){//pkt_gen_gap = 100 000,即100毫秒
-
             aCar->counter_to_TX++;
         }
 
@@ -106,10 +107,11 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
 
                         aCar->condition_80211 = TX;
                         aCar->tx_timestamp = slot;
-                        //发包 todo 将生成的包挂到对应位置的接收端
-                        transmit(aCar);
+                        //发包  将生成的包挂到对应位置的接收端
+                        aCar->tx_collision_flag = false;
+                        transmit(aCar, slot);
                         counter_tx++;
-
+                        cnt_pkt_tx++;
                         aCar->counter_to_TX -=1;
                         aCar->transmitted_packets++;
                     }
@@ -126,7 +128,7 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
                             aCar->condition_80211 = TX;
                             aCar->tx_timestamp = slot;
                             //发包  将生成的包挂到对应位置的接收端
-                            transmit(aCar);
+                            transmit(aCar, slot);
                             counter_tx++;
 
                             aCar->counter_to_TX -=1;
@@ -146,15 +148,30 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
                 }
             }
         }else if(aCar->condition_80211 == TX){
-            if(slot == aCar->tx_timestamp + duration_tx){//结束发包
 
+            if(slot < aCar->tx_timestamp + duration_tx){//处于发包过程中的时候需要看是否有别人给自己发了包，如果有别人给自己发了包，那么本次发射失败，产生tx_collision
+                int len = aCar->packet_info_list->size();
+                if(len >=1 &&(*(aCar->packet_info_list))[len-1]->timestamp == slot){
+                    aCar->tx_collision_flag = true;
+                }
+            }else if(slot == aCar->tx_timestamp + duration_tx){//结束发包
+                if(aCar->tx_collision_flag == true){
+                    cnt_tx_collision++;
+                }else{
+                    cnt_tx_normal++;
+                }
                 aCar->condition_80211 = SENS;
                 aCar->counter_sense = 0;
                 aCar->sense_timestamp = slot;
+            }else{
+                cerr<<"ERROR TX!!!"<<endl;
             }
         }else{
-            cerr<<"Error! Strange condition!";
+            cerr<<"Error! Strange condition!"<<endl;
         }
+
+        // 根据收包情况，更新统计量
+        count_collisions_received_each_slot(aCar, slot);
 //        if(slot == 19999990) cout <<"slot: " << slot << "  id : " <<  aCar->id << " tx " << aCar->transmitted_packets << endl;
         aItem = aItem->next;
     }
@@ -163,7 +180,7 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
 }
 
 //生成一个packet，挂到通信半径范围内的车上
-void transmit(struct vehicle* aCar){
+void transmit(struct vehicle* aCar, int slot){
     struct Item *bItem;
     struct vehicle *bCar;
 
@@ -178,7 +195,8 @@ void transmit(struct vehicle* aCar){
             num_neighbour++;
             cnt++;
             bCar->packets->push_back(aCar->tx_timestamp);
-
+            struct packet * pkt = generate_packet(aCar, bCar,slot, NO_COLI);
+            bCar->packet_info_list->push_back(pkt);
             bItem = bItem->next;
         }
     }
@@ -207,6 +225,45 @@ bool Is_received(struct vehicle* aCar){
     return false;
 }
 
+
+
+void count_collisions_received_each_slot(struct vehicle *aCar, int slot){
+    int num_pkt = 0;
+    int len = aCar->packet_info_list->size();
+
+    for(int i = len -1; i>=0 ; i--){
+        if((*(aCar->packet_info_list))[i]->timestamp == slot)
+            num_pkt++;
+        else
+            break;
+    }
+
+    if(num_pkt == 1){
+        struct packet* pkt= (*(aCar->packet_info_list))[len-1];
+        pkt->condition = NO_COLI;
+        cnt_rx_normal++;
+        if(strcmp(pkt->srcVehicle->lane, aCar->lane)==0 && pkt->srcVehicle->pos > aCar->pos)
+            cnt_frontV_colli++;
+        if(strcmp(pkt->srcVehicle->lane, aCar->lane)==0 && pkt->srcVehicle->pos < aCar->pos)
+            cnt_rearV_Colli++;
+    }else if(num_pkt >=2 ) {
+        cnt_rx_colli += num_pkt;
+        // cout<<"asdasdasd----------------"<<endl;
+
+        for(int ii = len-1; ii >=len-num_pkt; ii--){
+            struct packet *pkt = (struct packet*) (*(aCar->packets))[ii];
+            pkt->condition = RX_COLI;
+
+//            if(pkt->timestamp == slot){
+//                cout<<"timestamp = "<<pkt->timestamp<< ",there is a RX collision, pkt->src = "<<pkt->srcVehicle->id<<" pkt->dst = "<< pkt->dstVehicle->id<<"src->slot="<<pkt->srcVehicle->slot_occupied <<" dst->slot= "<<pkt->dstVehicle->slot_occupied<<" src->commRange="<< pkt->srcVehicle->commRadius<<" dst->commRange="<< pkt->dstVehicle->commRadius<<endl;
+//            }
+            if(strcmp(pkt->srcVehicle->lane, aCar->lane)==0 && pkt->srcVehicle->pos > aCar->pos)
+                cnt_frontV_colli++;
+            if(strcmp(pkt->srcVehicle->lane, aCar->lane)==0 && pkt->srcVehicle->pos < aCar->pos)
+                cnt_rearV_Colli++;
+        }
+    }
+}
 //数一下车辆有没有碰撞，有的话是多少; 顺便也数一下正常收包的个数
 vector<int> count_collisions_received(struct vehicle* aCar){
     int collisions =0;

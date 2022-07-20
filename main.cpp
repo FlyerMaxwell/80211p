@@ -1,6 +1,5 @@
 #include <iostream>
 
-#include <iostream>
 #include <fstream>
 #include "common.h"
 #include "UpLocation.h"
@@ -41,9 +40,6 @@ int main(int argc, char * argv[]) {
     total_frame = slot_end/1000;   //0.1秒是一帧
 
 
-
-
-
     vector<float> rate;
     vector<int> arr = {1000000, 2000000, 5000000, 8000000, 10000000, 12000000, 15000000, 16000000, 17000000, 18000000, 19000000, slot_end - slot_step};
     int critic = 0;
@@ -52,31 +48,38 @@ int main(int argc, char * argv[]) {
     duallist_init(&ALL_Vehicles);
 
     for(int slot = slot_start; slot < slot_end; slot += slot_step){
-        //cout<<"slot = "<< slot<<endl;
-
-//        logVehilcesInfo(&ALL_Vehicles, logfile);
-//        logfile<<endl;
-
+        cout<<slot<<endl;
         if(slot % (UpLocSlot*1000) == 0){ //仍然是每5毫秒更新一下位置
             if(slot % 100000 == 0) cout << "slot = " << slot << endl;
             init_simulation(&ALL_Vehicles);
             updateLocation(&ALL_Vehicles, slot, trace_path);
             handle_neighbours(&ALL_Vehicles);
-            //cout<<"The location of vehicles has been updated, Current slot = "<<slot<<endl;
-            //printVehilces(&ALL_Vehicles);
-
-//            logfile<<"Event: Update location! Current slot = "<<slot<<", Car_Number="<<Car_Number<<endl;
-//            logVehilcesInfo(&ALL_Vehicles, logfile);
-//            logfile<<endl;
-
         }
 
         mac_80211p(&ALL_Vehicles, slot);
-        if (critic != arr.size() && (int)slot == arr[critic]){
-            rate.push_back((float) (counter_received) / (0.01 + counter_received + counter_collision));
 
-            critic++;
+
+
+//        if (critic != arr.size() && (int)slot == arr[critic]){
+//            rate.push_back((float) (counter_received) / (0.01 + counter_received + counter_collision));
+//
+//            critic++;
+//        }
+        if(slot % SlotPerFrame == 0){// 1000个slot是1000微秒，即1ms； 每100ms进行统计，故为10e5
+            log_statistic_file<<slot/100000<<" "<<cnt_cars<<" "<<cnt_tx_collision<<" "<<cnt_rx_normal<<" "<<cnt_rx_colli<<" "<<cnt_pkt_tx<<" "<<cnt_pkt_tx_normal<<" "<<cnt_frontV_normal<<" "<<cnt_rearV_normal<<" "<<cnt_frontV_colli<<" "<<cnt_rearV_Colli<<endl;
+            // Reset the Statisical Para
+            cnt_cars = 0;
+            cnt_tx_collision = 0;  //两个发射碰撞
+            cnt_rx_normal = 0;  //正常收包
+            cnt_rx_colli = 0;  //产生碰撞的包
+            cnt_pkt_tx = 0;
+            cnt_pkt_tx_normal = 0;
+            cnt_frontV_normal = 0;
+            cnt_rearV_normal = 0;
+            cnt_frontV_colli = 0;
+            cnt_rearV_Colli = 0;
         }
+
     }
 
     struct Item *aItem;
@@ -95,9 +98,10 @@ int main(int argc, char * argv[]) {
     cout<<"Received:"<<counter_received<<endl;
     cout<<"total Cars:"<<Car_Number<<endl;
     logfile.close();
-    for(int i = 0; i < rate.size(); i++){
-        cout << arr[i] << " packets with rate = " << rate[i] << endl;
-    }
+
+//    for(int i = 0; i < rate.size(); i++){
+//        cout << arr[i] << " packets with rate = " << rate[i] << endl;
+//    }
 
     return 0;
 }
