@@ -1,241 +1,188 @@
 //
-// Created by cyx02 on 2022/7/14.
+// Created by cyx02 on 2022/6/27.
 //
 
-#include "Protocol_80211.h"
-#include <vector>
+#include "UpLocation.h"
 #include "common.h"
+#include <stddef.h>
 #include "vehicle.h"
+#include <cstdio>
+#include <stdlib.h>
+#include "parameters.h"
+#include "string.h"
+#include <string>
 #include <iostream>
+#include "Protocol_80211.h"
 
-
-using namespace std;
-
-/*
- * 这是全新版本的802.11p，协议是怎样的呢？
- *
- * 整个协议非常的简单。一个车辆如果连续听到58微妙的持续idle，则设置一个回退计数器k \in [0, CW],每经过一个Ts，k--。当k减小到0的时候进行发射，发射持续的时间是0.67ms。
- * 每0.1秒产生一个packet
- *
- * 时槽设置为13微秒
- *
- * 每个时槽为1微秒
- * 1）每过0.1秒，enque一个packet
- * 2）sensed_idle ++或者置0，如果置0，则设置一个k。且k--
- * 3）当k = 0, 将包发射出去
- *
- * 与先前类似，发包即为将包挂在周围所有的节点身上
- *
- * 整个过程不需要对包的内容进行求解
- *
- * 车辆总共有几种状态？
- * 1） 正在发射
- * 2） 正在感知累计AIFS
- * 3） 准备发射状态。正在感知降低k
- *
- * 每个时槽1微秒喽
- * 在802.11p中 什么叫碰撞呢？
- * 在同一个接收节点处，同时听到了两个包
- *
- * 所以就是，遍历所有的车。
- * 每0.1秒产生一个广播需求
- *
- * 1） 如果车辆处于正在发射(TX)，则判断是否发射完了，如果没有发射完则保持发射状态；如果发射完了，切换到感知状态，重置AIFS
- * 2） 如果车辆处于感知状态(SENS)，则每经过Ts开始累计AIFS，当累计够了，则设置一个一个参数k，并且切换到准备发射状态；如果没有累计够，就继续累积，如果听到了有人发包则重新归零
- * 3） 如果车辆处于准备发射状态(PREP)，如果听到有人发包，则冻结当前的k，知道再经过AIFS没人说话则开始发包；如果k减小到0了，则开始发包
- *
- * 通过ACK决定是否重传。我们不采用重传的机制
- *
- * 正常是这个过程。但是这样写会有一个严重的问题，就是每一微秒，都要把所有的车辆全部过一遍，这个成本是很高的。有什么办法吗？
- *
- * 第二个问题，就是怎么检测发包过程中的碰撞呢？--->还是handle receiver，只不过这个处理相当于仅仅去看接收处的collision；即当全部车辆在一个时里面发包完成之后。还要再遍历一遍所有的车辆，看一下所有的车辆的收包情况。当然了，这个是不是可以在所有的车辆全部发包完了之后，每个车辆后面都挂了一堆的packet。这个时候进行处理呢？当然可以！这样就不用在每个微秒进行处理了！
- *
- *
- * 所以思路就很清楚了，先写一个大的时间循环，把整个发包的过程模拟出来。再处理一遍所有汽车的packet（其实这个时候有些车辆会消失，所以应该单独存一个数据结构，保存下来所有发的包) 或者直接把出界的车标一个状态，而不是清空掉。或者就直接对于要出界的车，先完成包的统计再清除掉。
- *
- * 如何完成碰撞的统计？
- *
- * 对于一个车来说，收到若干个包，这些包的起止时间是有的，要给一个算法，问有多少交叉。所以就直接保存一个数组楼，这个数组的元素就是[start,end],问交叠的和没交迭的packet分别有多少；这个数据结构倒是可以单独存一下 噢，一层hashtable，id-> 一维数组（存的是pair）的地址
- *
- *
- * 今天还要解决一个问题，就是统计的时候应该只统计安全相关的packets。这个要怎么统计呢？安全相关的包发了多少，接受率，碰撞率如何。
-
- */
-
-void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
-    struct Item * aItem;
-    struct vehicle* aCar;
+int init_simulation(struct Duallist *ALL_Vehicles){
+    struct Item *aItem;
+    struct vehicle *aCar;
     aItem = ALL_Vehicles->head;
-    while(aItem != NULL) {
-        aCar = (struct vehicle *) aItem->datap;
-        aCar->commRadius = 300;
+    while (aItem != NULL){
+        aCar = (struct vehicle*)aItem->datap;
 
-        //每100ms 添加发包的需求
-        if((slot - aCar->slot_appeared)% pkt_gen_gap == 0){//pkt_gen_gap = 100 000,即100毫秒
+        //---需要初始化的内容---//
+        aCar->handled = 0;
+        //---需要初始化的内容---//
 
-            aCar->counter_to_TX++;
+        aItem = aItem->next;
+    }
+    return 0;
+}
+
+
+
+// Update location.
+void updateLocation(struct Duallist *ALL_Vehicles, int slot, string trace_path){
+    FILE *fin = NULL;
+    int flag;
+    int timestep;
+    struct Item *aItem, *bItem;
+    //struct neighbour_car* tNeigh, *nNeigh, *bNeigh;
+    struct vehicle *aCar, *bCar, *cCar;
+    int car_count = 0;
+
+    trace_path += to_string(slot/1000);//除以1000，转成毫秒
+    trace_path += ".txt";
+
+    //printf("Loading vehilces...\n");
+
+    //sprintf(file_path, "C:\\Users\\cyx02\\Desktop\\SUMO\\highway\\transformerd\\carposition_%d.txt", slot);
+    //fin = fopen(file_path, "r");
+
+    //printf("%s\n", trace_path.c_str());
+    fin = fopen(trace_path.c_str(), "r");
+    if(!fin){cerr <<"Load file error \n"; return ;}
+
+    //读取文件，添加车辆
+    while(fscanf(fin, "%d", &timestep)!=-1){
+        struct vehicle *new_car;
+        new_car=(struct vehicle*)malloc(sizeof(struct vehicle));
+
+        new_car->handled = 2;//新车
+        new_car->slot_appeared = slot;
+
+        //load location information
+        fscanf(fin, "%s", new_car->id);
+        fscanf(fin, "%lf", &new_car->x);
+        fscanf(fin, "%lf", &new_car->y);
+        fscanf(fin, "%lf", &new_car->angle);
+        fscanf(fin, "%s", new_car->type);
+        fscanf(fin, "%lf", &new_car->speed);
+        fscanf(fin, "%lf", &new_car->pos);
+        fscanf(fin, "%s", new_car->lane);
+        fscanf(fin, "%lf", &new_car->slope);
+        fscanf(fin, "%lf", &new_car->flow);
+        fscanf(fin, "%lf", &new_car->speed2);
+
+        new_car->acc = 4.5;
+
+        //802.11p related parameters
+        new_car->counter_to_TX = 0;
+        new_car->condition_80211 = SENS;
+        new_car->sense_timestamp = slot;
+        new_car->transmitted_packets = 0;
+
+
+
+        //查找new_Car是否已经存在， 若存在，flag=true；若不存在，则flag = false;遍历一次ALL_Vehicles双链表，看是否已经存在（id是否相等），若相等则flag=true；若不相等，则flag=false
+        flag = false;
+        bItem = (struct Item*)ALL_Vehicles->head;
+        while(bItem != NULL){
+            bCar = (struct vehicle*)bItem->datap;
+            if (!strcmp(bCar->id, new_car->id)) {
+                flag = true;
+                break;
+            }
+            bItem = bItem->next;
         }
 
-        if(aCar->condition_80211 == SENS){
-            if( (slot - aCar->sense_timestamp) % Ts == 0){
-                if(Is_received(aCar) == false){
-                    aCar->counter_sense++;
-                    if(aCar->counter_sense *Ts >= Ts*2 +32){
-
-                        aCar->condition_80211 = PREP;
-                        aCar->k = rand() % CW_min + 2;
-
-                        aCar->prep_timestamp = slot;
-                        aCar->counter_froze = 0;
-                        aCar->prep_frozen = false;
-                    }
-                }else{
-                    aCar->counter_sense = 0;
-                }
-            }
-
-        }else if(aCar->condition_80211 == PREP){
-
-            if((slot - aCar->prep_timestamp) % Ts == 0){
-
-                if(aCar->prep_frozen == false && Is_received(aCar) == false){
-
-                    if(aCar->k != 0) aCar->k -= 1;
-
-                    if(aCar->k <= 0 && aCar->counter_to_TX != 0){
-
-                        aCar->condition_80211 = TX;
-                        aCar->tx_timestamp = slot;
-                        //发包 todo 将生成的包挂到对应位置的接收端
-                        transmit(aCar);
-                        counter_tx++;
-
-                        aCar->counter_to_TX -=1;
-                        aCar->transmitted_packets++;
-                    }
-                }else if(aCar->prep_frozen == true && Is_received(aCar) == false){
-
-                    aCar->counter_froze++;
-                    if(aCar->counter_froze*Ts >= 2*Ts+32){
-                        aCar->prep_frozen = false;
-                        if(aCar->k != 0) aCar->k -= 1;
-
-                        if(aCar->k <= 0 && aCar->counter_to_TX != 0){
+        //若之前已存在，则更新其运动学信息
+        if(flag == true){
+            bCar->x = new_car->x;
+            bCar->y = new_car->y;
+            bCar->angle = new_car->angle;
+            bCar->speed = new_car->speed;
+            bCar->pos = new_car->pos;
 
 
-                            aCar->condition_80211 = TX;
-                            aCar->tx_timestamp = slot;
-                            //发包 todo 将生成的包挂到对应位置的接收端
-                            transmit(aCar);
-                            counter_tx++;
+            strcpy(bCar->prev_lane, new_car->lane);//记录下来是从哪个车道便过来的
+            strcpy(bCar->lane, new_car->lane);
 
-                            aCar->counter_to_TX -=1;
-                            aCar->transmitted_packets++;
-                        }
-                    }
-                }else if(aCar->prep_frozen == false && Is_received(aCar) == true){
+            bCar->slope = new_car->slope;
+            bCar->flow = new_car->flow;
+            bCar->speed2 = new_car->speed2;
 
-                    aCar->prep_frozen = true;
-                    aCar->counter_froze = 0;
-                }else if(aCar->prep_frozen == true && Is_received(aCar) == true){
 
-                    aCar->counter_froze = 0;
-                }else{
 
-                    cerr<<"Error PREP"<<endl;
-                }
-            }
-        }else if(aCar->condition_80211 == TX){
-            if(slot == aCar->tx_timestamp + duration_tx){//结束发包
+            bCar->handled = 1;//已有的车辆且处理
 
-                aCar->condition_80211 = SENS;
-                aCar->counter_sense = 0;
-                aCar->sense_timestamp = slot;
-            }
+            free(new_car);
+        }
+
+        //若之前不存在,则添加新车
+        if (flag == false){
+            Car_Number++;
+
+            new_car->packets = new vector<int>;
+            duallist_init(&(new_car->neighbours));
+            duallist_add_to_tail(ALL_Vehicles, new_car);
+        }
+
+    }
+
+    fclose(fin);
+
+    //处理消失的车(离开地图)，直接去掉即可。我的协议可以应对这种case，无非就是下个时刻听不到它了呗。没问题
+    aItem = ALL_Vehicles->head;
+    while(aItem != NULL){
+        aCar = (struct vehicle*)aItem->datap;
+        if(aCar->handled == 0){
+
+            count_collisions_received(aCar);
+
+
+            //duallist_destroy(&(aCar->packets), free); //这里可能存在内存泄露，因为没有把对应的指向的packet给清理掉
+            duallist_destroy(&(aCar->neighbours), NULL);
+
+            struct Item* deleteItem = aItem;
+            aItem = aItem->next;
+            duallist_pick_item(ALL_Vehicles, deleteItem);
+
         }else{
-            cerr<<"Error! Strange condition!";
+            car_count++;
+            aItem = aItem->next;
+        }
+    }
+
+    //printf("total car number in this slot: %d\n", car_count);
+    //printf("Vehicles have been loaded!\n");
+    return;
+}
+
+
+
+//handle neighbors： 处理邻居，将所有车辆的所在的九宫格内的车挂载到其潜在的neighbors中,即每个车辆的neighbors就是当前九宫格内的邻居。暴力，两层循环。这里暴力是为了后面每次遍历的时候能少遍历一点
+void handle_neighbours(struct Duallist *ALL_Vehicles){
+    struct Cell *aCell, *nCell;
+    struct Item *aItem, *nItem;
+    struct vehicle* aCar, *nCar;
+
+    aItem =ALL_Vehicles-> head;
+    while(aItem != NULL){
+        aCar = (struct vehicle*)aItem->datap;
+        duallist_destroy(&(aCar->neighbours), NULL);//先把之前的清空掉
+        nItem = ALL_Vehicles-> head;
+        while(nItem != NULL){
+            nCar = (struct vehicle*)nItem->datap;
+            //id不相等且处于两千米以内，则将其加入到neighbors
+            if(strcmp(nCar->id, aCar->id)!=0 && distance_between_vehicle(aCar,nCar) < 300){
+                duallist_add_to_tail(&(aCar->neighbours), nCar);//将id不同的车加入到neighbor list。
+            }
+            nItem = nItem->next;
         }
         aItem = aItem->next;
     }
-
-
 }
 
-//生成一个packet，挂到通信半径范围内的车上
-void transmit(struct vehicle* aCar){
-    struct Item *bItem;
-    struct vehicle *bCar;
 
-    bItem = (struct Item*)aCar->neighbours.head;//遍历当前transmitter的邻居节点
-    while(bItem != NULL) {
-        bCar = (struct vehicle*)bItem->datap;
-        double distanceAB = distance_between_vehicle(aCar, bCar);
-        if(aCar->commRadius <distanceAB){
-            bItem = bItem->next;
-        }else{
-            bCar->packets->push_back(aCar->tx_timestamp);
-
-            bItem = bItem->next;
-        }
-    }
-}
-
-//判断是否周围有车在发包。遍历一遍邻居，看有没有在300米内，处于TX的邻居，如果有，则说明有人在发，返回true；否则返回false
-bool Is_received(struct vehicle* aCar){
-    struct Item *bItem;
-    struct vehicle *bCar;
-
-    bItem = (struct Item*)aCar->neighbours.head;//遍历当前transmitter的邻居节点
-    while(bItem != NULL) {
-        bCar = (struct vehicle*)bItem->datap;
-        double distanceAB = distance_between_vehicle(aCar, bCar);
-        if(aCar->commRadius < distanceAB){
-            bItem = bItem->next;
-        }else{
-            if(bCar->condition_80211 == TX)
-                return true;
-            else{
-                bItem = bItem->next;
-            }
-        }
-    }
-    return false;
-}
-
-//数一下车辆有没有碰撞，有的话是多少; 顺便也数一下正常收包的个数
-vector<int> count_collisions_received(struct vehicle* aCar){
-    int collisions =0;
-    vector<int> ans;
-    int len = aCar->packets->size();
-    if(len == 0)
-        return ans;
-    if(len == 1){
-        counter_received++;
-        return vector<int>{0,1};
-    }
-
-    vector<int> mark(len,0);
-
-    for(int i = 0; i < len - 1; i++){
-        if(   (*(aCar->packets))[i]+ duration_tx >=  (*(aCar->packets))[i+1]  ) {
-            mark[i] = -1;
-            mark[i+1] = -1;
-        }
-    }
-
-    for(int i = 0; i< mark.size(); i++){
-        if(mark[i] == -1){
-            collisions++;
-            counter_collision++;
-        }
-
-
-    }
-    counter_received += len - collisions; // 更新全局的正常收包个数
-
-    cout<<" len="<<len<<", received="<<len - collisions<<", collision="<<collisions<<endl;
-
-    ans.push_back(collisions);
-    ans.push_back(len - collisions);
-    return ans;
-}

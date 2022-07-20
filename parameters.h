@@ -13,7 +13,6 @@
 extern int UpLocSlot;
 extern int SlotPerFrame;
 extern int Car_Number;
-extern int cnt_pkt_tx;
 extern int cnt_pkt_0;
 extern int cnt_pkt;
 extern int cnt_pkt_1;
@@ -36,6 +35,22 @@ extern int duration_tx;
 extern int counter_received;
 extern int counter_tx;
 
+extern int total_frame;
+
+
+
+
+// Statistic Parameters
+extern int cnt_cars;
+extern int cnt_tx_collision;
+extern int cnt_rx_normal;
+extern int cnt_rx_colli;
+extern int cnt_pkt_tx;
+extern int cnt_pkt_tx_normal;
+extern int cnt_frontV_normal;
+extern int cnt_rearV_normal;
+extern int cnt_frontV_colli;
+extern int cnt_rearV_Colli;
 
 
 #endif //BUBBLEMAC_INFOCOM_PARAMETERS_H

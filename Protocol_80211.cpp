@@ -65,7 +65,6 @@ using namespace std;
 void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
     struct Item * aItem;
     struct vehicle* aCar;
-
     aItem = ALL_Vehicles->head;
     while(aItem != NULL) {
         aCar = (struct vehicle *) aItem->datap;
@@ -73,6 +72,7 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
 
         //每100ms 添加发包的需求
         if((slot - aCar->slot_appeared)% pkt_gen_gap == 0){//pkt_gen_gap = 100 000,即100毫秒
+
             aCar->counter_to_TX++;
         }
 
@@ -81,8 +81,10 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
                 if(Is_received(aCar) == false){
                     aCar->counter_sense++;
                     if(aCar->counter_sense *Ts >= Ts*2 +32){
+
                         aCar->condition_80211 = PREP;
-                        aCar->k = rand() % CW_min;
+                        aCar->k = rand() % CW_min + 2;
+
                         aCar->prep_timestamp = slot;
                         aCar->counter_froze = 0;
                         aCar->prep_frozen = false;
@@ -93,42 +95,67 @@ void mac_80211p(struct Duallist *ALL_Vehicles, int slot){
             }
 
         }else if(aCar->condition_80211 == PREP){
+
             if((slot - aCar->prep_timestamp) % Ts == 0){
+
                 if(aCar->prep_frozen == false && Is_received(aCar) == false){
-                    aCar->k -= 1;
-                    if(aCar->k == 0 && aCar->counter_to_TX != 0){
+
+                    if(aCar->k != 0) aCar->k -= 1;
+
+                    if(aCar->k <= 0 && aCar->counter_to_TX != 0){
+
                         aCar->condition_80211 = TX;
                         aCar->tx_timestamp = slot;
                         //发包 todo 将生成的包挂到对应位置的接收端
                         transmit(aCar);
                         counter_tx++;
+
                         aCar->counter_to_TX -=1;
                         aCar->transmitted_packets++;
-                   }
+                    }
                 }else if(aCar->prep_frozen == true && Is_received(aCar) == false){
+
                     aCar->counter_froze++;
                     if(aCar->counter_froze*Ts >= 2*Ts+32){
                         aCar->prep_frozen = false;
+                        if(aCar->k != 0) aCar->k -= 1;
+
+                        if(aCar->k <= 0 && aCar->counter_to_TX != 0){
+
+
+                            aCar->condition_80211 = TX;
+                            aCar->tx_timestamp = slot;
+                            //发包  将生成的包挂到对应位置的接收端
+                            transmit(aCar);
+                            counter_tx++;
+
+                            aCar->counter_to_TX -=1;
+                            aCar->transmitted_packets++;
+                        }
                     }
                 }else if(aCar->prep_frozen == false && Is_received(aCar) == true){
+
                     aCar->prep_frozen = true;
                     aCar->counter_froze = 0;
                 }else if(aCar->prep_frozen == true && Is_received(aCar) == true){
+
                     aCar->counter_froze = 0;
                 }else{
+
                     cerr<<"Error PREP"<<endl;
                 }
             }
         }else if(aCar->condition_80211 == TX){
-             if(slot == aCar->tx_timestamp + duration_tx){//结束发包
-                 aCar->condition_80211 = SENS;
-                 aCar->counter_sense = 0;
-                 aCar->sense_timestamp = slot;
-             }
+            if(slot == aCar->tx_timestamp + duration_tx){//结束发包
+
+                aCar->condition_80211 = SENS;
+                aCar->counter_sense = 0;
+                aCar->sense_timestamp = slot;
+            }
         }else{
             cerr<<"Error! Strange condition!";
         }
-
+//        if(slot == 19999990) cout <<"slot: " << slot << "  id : " <<  aCar->id << " tx " << aCar->transmitted_packets << endl;
         aItem = aItem->next;
     }
 
@@ -141,17 +168,21 @@ void transmit(struct vehicle* aCar){
     struct vehicle *bCar;
 
     bItem = (struct Item*)aCar->neighbours.head;//遍历当前transmitter的邻居节点
+    int cnt = 0, num_neighbour = 0;
     while(bItem != NULL) {
         bCar = (struct vehicle*)bItem->datap;
         double distanceAB = distance_between_vehicle(aCar, bCar);
         if(aCar->commRadius <distanceAB){
             bItem = bItem->next;
         }else{
+            num_neighbour++;
+            cnt++;
             bCar->packets->push_back(aCar->tx_timestamp);
-            // cout<<"Received Packets!"<<endl;
+
             bItem = bItem->next;
         }
     }
+//    cout << aCar->id << " send " << cnt << " in "<< num_neighbour << endl;
 }
 
 //判断是否周围有车在发包。遍历一遍邻居，看有没有在300米内，处于TX的邻居，如果有，则说明有人在发，返回true；否则返回false
@@ -191,10 +222,10 @@ vector<int> count_collisions_received(struct vehicle* aCar){
     vector<int> mark(len,0);
 
     for(int i = 0; i < len - 1; i++){
-       if(   (*(aCar->packets))[i]+ duration_tx <  (*(aCar->packets))[i+1]  ) {
-          mark[i] = -1;
-          mark[i+1] = -1;
-       }
+        if(   (*(aCar->packets))[i]+ duration_tx >=  (*(aCar->packets))[i+1]  ) {
+            mark[i] = -1;
+            mark[i+1] = -1;
+        }
     }
 
     for(int i = 0; i< mark.size(); i++){
@@ -203,10 +234,11 @@ vector<int> count_collisions_received(struct vehicle* aCar){
             counter_collision++;
         }
 
+
     }
     counter_received += len - collisions; // 更新全局的正常收包个数
 
-    cout<<" len="<<len<<", received="<<len - collisions<<", collision="<<collisions<<endl;
+//    cout<<" len="<<len<<", received="<<len - collisions<<", collision="<<collisions<<endl;
 
     ans.push_back(collisions);
     ans.push_back(len - collisions);
