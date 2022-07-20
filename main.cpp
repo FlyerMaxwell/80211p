@@ -30,6 +30,16 @@ int main(int argc, char * argv[]) {
     logfile.open(log_dir);
     if(!logfile){cerr <<"create file error \n"; return 1;}
 
+
+
+    string log_dir_statistic = ".\\log_statistic_";
+    log_dir_statistic += to_string(traffic_density);
+    log_dir_statistic += ".txt";
+
+    log_statistic_file.open(log_dir_statistic);
+    if(!log_statistic_file){cerr <<"create file error \n"; return 1;}
+
+
     srand(0);
 
     int slot_start = 0;         //这里一个slot变成1微秒， 1秒等于1000毫秒，等于100 000微秒
